@@ -4,16 +4,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
-local character = player.Character or player.CharacterAdded:Wait()
-local humanoid = character:WaitForChild("Humanoid")
-local root = character:WaitForChild("HumanoidRootPart")
-
--- ระบบค้นหาไฟล์อัตโนมัติ
-local function findObject(name)
-    return workspace:FindFirstChild(name, true) or ReplicatedStorage:FindFirstChild(name, true)
-end
-local remote = findObject("ToolCollect")
-local collectibles = findObject("Collectibles")
 
 -- ล้างของเก่า
 if player.PlayerGui:FindFirstChild("MyAutoFarmGui") then player.PlayerGui.MyAutoFarmGui:Destroy() end
@@ -30,6 +20,7 @@ mainFrame.Position = UDim2.new(0.1, 0, 0.1, 0)
 mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 mainFrame.BorderSizePixel = 0
 
+-- ตัวจัดเรียงอัตโนมัติ
 local layout = Instance.new("UIListLayout", mainFrame)
 layout.Padding = UDim.new(0, 10); layout.HorizontalAlignment = Enum.HorizontalAlignment.Center; layout.SortOrder = Enum.SortOrder.LayoutOrder
 
@@ -57,7 +48,13 @@ mainFrame.InputBegan:Connect(function(input) if input.UserInputType == Enum.User
 UserInputService.InputChanged:Connect(function(input) if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then local delta = input.Position - dragStart; mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y) end end)
 UserInputService.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
 
--- [ 2. Logic อัปเดตค่า ]
+-- [ 2. Visualizer (วงกลม Rainbow) ]
+local areaVisual = Instance.new("Part", workspace)
+areaVisual.Name = "TokenAreaVisual"; areaVisual.Shape = Enum.PartType.Cylinder; areaVisual.Transparency = 1; areaVisual.Anchored = true; areaVisual.CanCollide = false
+local highlight = Instance.new("SelectionBox", areaVisual)
+highlight.Adornee = areaVisual; highlight.LineThickness = 0.08
+
+-- [ 3. Logic & ลูปหลัก ]
 radiusBox.FocusLost:Connect(function() Config.Radius = tonumber(radiusBox.Text) or Config.Radius end)
 speedBox.FocusLost:Connect(function() Config.Speed = tonumber(speedBox.Text) or Config.Speed end)
 jumpBox.FocusLost:Connect(function() Config.Jump = tonumber(jumpBox.Text) or Config.Jump end)
@@ -67,22 +64,31 @@ toggleBtn.MouseButton1Click:Connect(function()
     toggleBtn.BackgroundColor3 = Config.AutoClick and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(200, 50, 50)
 end)
 
--- [ 3. ลูปหลักประสิทธิภาพสูง ]
 RunService.Heartbeat:Connect(function()
-    if not root or not humanoid then 
-        -- อัปเดตตัวแปรเมื่อตัวละครเกิดใหม่
-        character = player.Character
-        if character then humanoid = character:FindFirstChild("Humanoid"); root = character:FindFirstChild("HumanoidRootPart") end
-        return 
+    local char = player.Character
+    if not char then return end
+    local hum = char:FindFirstChild("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    
+    if hum then
+        if hum.WalkSpeed ~= Config.Speed then hum.WalkSpeed = Config.Speed end
+        if hum.JumpPower ~= Config.Jump then hum.JumpPower = Config.Jump end
     end
     
-    -- อัปเดต Stats แบบบังคับ (Enforcement)
-    if humanoid.WalkSpeed ~= Config.Speed then humanoid.WalkSpeed = Config.Speed end
-    if humanoid.JumpPower ~= Config.Jump then humanoid.JumpPower = Config.Jump end
+    if not root then return end
+    
+    -- วงกลม Rainbow (ไม่หายแน่นอน)
+    highlight.Color3 = Color3.fromHSV(tick() % 5 / 5, 1, 1)
+    areaVisual.CFrame = CFrame.new(root.Position - Vector3.new(0, 2.5, 0)) * CFrame.Angles(0, 0, math.rad(90))
+    areaVisual.Size = Vector3.new(0.1, Config.Radius * 2, Config.Radius * 2)
     
     -- ตี & เก็บของ
-    if Config.AutoClick and remote then remote:FireServer() end
+    if Config.AutoClick then
+        local remote = workspace:FindFirstChild("ToolCollect", true) or ReplicatedStorage:FindFirstChild("ToolCollect", true)
+        if remote then remote:FireServer() end
+    end
     
+    local collectibles = workspace:FindFirstChild("Collectibles", true)
     local target = nil; local shortest = Config.Radius
     if collectibles then
         for _, v in pairs(collectibles:GetChildren()) do
@@ -92,5 +98,5 @@ RunService.Heartbeat:Connect(function()
             end
         end
     end
-    if target then humanoid:MoveTo(target.Position) else humanoid:MoveTo(root.Position) end
+    if target then hum:MoveTo(target.Position) else hum:MoveTo(root.Position) end
 end)
