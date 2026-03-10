@@ -30,34 +30,27 @@ mainFrame.Position = UDim2.new(0.1, 0, 0.1, 0)
 mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
 mainFrame.BorderSizePixel = 0
 
--- ตัวจัดเรียงอัตโนมัติ (ช่วยให้บรรทัดไม่ซ้อนกัน)
+-- จัดเรียงบรรทัดอัตโนมัติ
 local layout = Instance.new("UIListLayout", mainFrame)
-layout.Padding = UDim.new(0, 10)
-layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Padding = UDim.new(0, 10); layout.HorizontalAlignment = Enum.HorizontalAlignment.Center; layout.SortOrder = Enum.SortOrder.LayoutOrder
 
--- [ 2. ฟังก์ชันสร้างช่องกรอกแบบมีป้ายกำกับ ]
+-- [ 2. ฟังก์ชันสร้างช่องกรอก ]
 local function createInput(labelText, placeholder, default, order)
     local container = Instance.new("Frame", mainFrame)
     container.Size = UDim2.new(0.9, 0, 0, 50); container.BackgroundTransparency = 1; container.LayoutOrder = order
-    
     local label = Instance.new("TextLabel", container)
-    label.Size = UDim2.new(1, 0, 0.4, 0); label.Text = labelText; label.BackgroundTransparency = 1
-    label.TextColor3 = Color3.new(1,1,1); label.Font = Enum.Font.SourceSansBold
-    
+    label.Size = UDim2.new(1, 0, 0.4, 0); label.Text = labelText; label.BackgroundTransparency = 1; label.TextColor3 = Color3.new(1,1,1); label.Font = Enum.Font.SourceSansBold
     local box = Instance.new("TextBox", container)
-    box.Size = UDim2.new(1, 0, 0.6, 0); box.Position = UDim2.new(0, 0, 0.4, 0)
-    box.PlaceholderText = placeholder; box.Text = tostring(default)
+    box.Size = UDim2.new(1, 0, 0.6, 0); box.Position = UDim2.new(0, 0, 0.4, 0); box.PlaceholderText = placeholder; box.Text = tostring(default)
     return box
 end
 
-local radiusBox = createInput("ระยะเก็บของ (Radius)", "30", Config.Radius, 1)
-local speedBox = createInput("ความเร็ว (WalkSpeed)", "78", Config.Speed, 2)
-local jumpBox = createInput("พลังกระโดด (JumpPower)", "100", Config.Jump, 3)
+local radiusBox = createInput("1. ระยะเก็บของ (Radius)", "30", Config.Radius, 1)
+local speedBox = createInput("2. ความเร็ว (WalkSpeed)", "78", Config.Speed, 2)
+local jumpBox = createInput("3. พลังกระโดด (JumpPower)", "100", Config.Jump, 3)
 
 local toggleBtn = Instance.new("TextButton", mainFrame)
-toggleBtn.Size = UDim2.new(0.9, 0, 0, 40); toggleBtn.Text = "Auto Click: OFF"
-toggleBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50); toggleBtn.LayoutOrder = 4
+toggleBtn.Size = UDim2.new(0.9, 0, 0, 40); toggleBtn.Text = "Auto Click: OFF"; toggleBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50); toggleBtn.LayoutOrder = 4
 
 -- ระบบลากหน้าต่าง
 local dragging, dragStart, startPos
@@ -65,7 +58,13 @@ mainFrame.InputBegan:Connect(function(input) if input.UserInputType == Enum.User
 UserInputService.InputChanged:Connect(function(input) if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then local delta = input.Position - dragStart; mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y) end end)
 UserInputService.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
 
--- [ 3. Logic อัปเดตค่า ]
+-- [ 3. Visualizer (วงกลม Rainbow) ]
+local areaVisual = Instance.new("Part", workspace)
+areaVisual.Name = "TokenAreaVisual"; areaVisual.Shape = Enum.PartType.Cylinder; areaVisual.Transparency = 1; areaVisual.Anchored = true; areaVisual.CanCollide = false
+local highlight = Instance.new("SelectionBox", areaVisual)
+highlight.Adornee = areaVisual; highlight.LineThickness = 0.08
+
+-- [ 4. Logic & ลูปหลัก ]
 radiusBox.FocusLost:Connect(function() Config.Radius = tonumber(radiusBox.Text) or Config.Radius end)
 speedBox.FocusLost:Connect(function() Config.Speed = tonumber(speedBox.Text) or Config.Speed end)
 jumpBox.FocusLost:Connect(function() Config.Jump = tonumber(jumpBox.Text) or Config.Jump end)
@@ -75,14 +74,16 @@ toggleBtn.MouseButton1Click:Connect(function()
     toggleBtn.BackgroundColor3 = Config.AutoClick and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(200, 50, 50)
 end)
 
--- [ 4. ลูปหลัก ]
 RunService.Heartbeat:Connect(function()
     if not root or not humanoid then return end
-    humanoid.WalkSpeed = Config.Speed
-    humanoid.JumpPower = Config.Jump
+    -- อัปเดต Stats
+    humanoid.WalkSpeed = Config.Speed; humanoid.JumpPower = Config.Jump
+    -- แสดงวงกลม
+    highlight.Color3 = Color3.fromHSV(tick() % 5 / 5, 1, 1)
+    areaVisual.CFrame = CFrame.new(root.Position - Vector3.new(0, 2.5, 0)) * CFrame.Angles(0, 0, math.rad(90))
+    areaVisual.Size = Vector3.new(0.1, Config.Radius * 2, Config.Radius * 2)
+    -- ตี & เก็บของ
     if Config.AutoClick and remote then remote:FireServer() end
-    
-    -- เดินเก็บของ (Lock Target)
     local target = nil; local shortest = Config.Radius
     if collectibles then
         for _, v in pairs(collectibles:GetChildren()) do
