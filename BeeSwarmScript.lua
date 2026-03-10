@@ -42,9 +42,10 @@ areaVisual.Name = "TokenAreaVisual"; areaVisual.Shape = Enum.PartType.Cylinder; 
 local highlight = Instance.new("SelectionBox", areaVisual)
 highlight.Adornee = areaVisual; highlight.LineThickness = 0.1
 
--- [ 3. ระบบฟาร์มแบบ Lock-on ]
+-- [ 3. ระบบฟาร์มแบบ Lock-on ปรับปรุงใหม่ ]
 local autoClick = false
 local lockedTarget = nil
+local lastSwitchTime = 0 -- ป้องกันการสลับเป้าหมายรัวๆ
 
 toggleBtn.MouseButton1Click:Connect(function()
     autoClick = not autoClick
@@ -58,16 +59,11 @@ RunService.Heartbeat:Connect(function()
     local hum = char:FindFirstChild("Humanoid")
     local root = char:FindFirstChild("HumanoidRootPart")
     
-    -- อ่านค่าสดๆ จาก GUI
     local r = tonumber(radiusBox.ValueBox.Text) or 30
     local s = tonumber(speedBox.ValueBox.Text) or 78
     local j = tonumber(jumpBox.ValueBox.Text) or 100
     
-    if hum then
-        hum.WalkSpeed = s
-        hum.JumpPower = j
-    end
-    
+    if hum then hum.WalkSpeed = s; hum.JumpPower = j end
     if not root then return end
     
     -- อัปเดต Area
@@ -75,30 +71,37 @@ RunService.Heartbeat:Connect(function()
     areaVisual.Size = Vector3.new(0.1, r * 2, r * 2)
     highlight.Color3 = Color3.fromHSV(tick() % 5 / 5, 1, 1)
     
-    -- Auto Click
     if autoClick then
         local remote = workspace:FindFirstChild("ToolCollect", true) or ReplicatedStorage:FindFirstChild("ToolCollect", true)
         if remote then remote:FireServer() end
     end
     
-    -- ระบบเดินเก็บแบบ Lock Target (แก้เดินวน)
+    -- [ Logic เดินแบบใหม่: ลดการสลับเป้าหมาย ]
     local collectibles = workspace:FindFirstChild("Collectibles", true)
     
-    -- ตรวจสอบว่าเป้าหมายที่ล็อกไว้ยัังอยู่ไหม
-    if lockedTarget and lockedTarget.Parent and (root.Position - lockedTarget.Position).Magnitude < r then
+    -- เช็คเป้าหมายเดิม
+    if lockedTarget and lockedTarget.Parent and (root.Position - lockedTarget.Position).Magnitude < (r + 10) then
         hum:MoveTo(lockedTarget.Position)
     else
-        lockedTarget = nil
-        local shortest = r
-        if collectibles then
-            for _, v in pairs(collectibles:GetChildren()) do
-                if v.Name == "C" and v:IsA("BasePart") then
-                    local dist = (root.Position - v.Position).Magnitude
-                    if dist < shortest then
-                        shortest = dist
-                        lockedTarget = v -- ล็อกเป้าหมายใหม่แล้วจะไม่เปลี่ยนจนกว่าจะถึง
+        -- ถ้าจะเปลี่ยนเป้าหมาย ต้องทิ้งระยะห่าง 0.3 วินาที (ป้องกันการวน)
+        if tick() - lastSwitchTime > 0.3 then
+            lockedTarget = nil
+            local bestTarget = nil
+            local shortest = r
+            if collectibles then
+                for _, v in pairs(collectibles:GetChildren()) do
+                    if v.Name == "C" and v:IsA("BasePart") then
+                        local dist = (root.Position - v.Position).Magnitude
+                        if dist < shortest then
+                            shortest = dist
+                            bestTarget = v
+                        end
                     end
                 end
+            end
+            if bestTarget then
+                lockedTarget = bestTarget
+                lastSwitchTime = tick()
             end
         end
         if lockedTarget then hum:MoveTo(lockedTarget.Position) else hum:MoveTo(root.Position) end
