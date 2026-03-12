@@ -19,13 +19,15 @@ end
 -- CONFIG & STATE
 --==================================================
 local CFG = {
-	Speed       = 78,
-	Jump        = 100,
-	AutoClick   = false,
-	AutoHoney   = false,
-	PathActive  = false,
-	AntiAFK     = false,
-	AutoBooster = false,
+	Speed        = 78,
+	Jump         = 100,
+	AutoClick    = false,
+	AutoHoney    = false,
+	PathActive   = false,
+	AntiAFK      = false,
+	AutoBooster  = false,
+	AutoWarpHive = true,   -- warp to hive when stuck too long
+	WarpThreshold = 3,     -- stuck ticks before warp (1 tick = 8s)
 }
 
 local S = {
@@ -43,6 +45,8 @@ local S = {
 	StuckTick    = 0,
 	ConvertStart = nil,
 	IsBoosting   = false,
+	WarpCount    = 0,       -- total warp-to-hive count this session
+	LastWarpTick = 0,       -- tick() of last warp
 }
 
 --==================================================
@@ -541,9 +545,51 @@ local jumpBox  = mkInputCard(p1, "JUMP POWER",  CFG.Jump,  3)
 
 sectionHeader(p1, "Automation", "🤖", 4)
 
-local btnAutoClick, _, toggleAutoClick = mkToggleBtn(p1, "Auto Click", nil, nil, 5)
-local btnHoney,     _, toggleHoney     = mkToggleBtn(p1, "Auto Make Honey", nil, nil, 6)
-local btnAntiAFK,   _, toggleAntiAFK   = mkToggleBtn(p1, "Anti-AFK", nil, nil, 7)
+local btnAutoClick,  _, toggleAutoClick  = mkToggleBtn(p1, "Auto Click",       nil, nil, 5)
+local btnHoney,      _, toggleHoney      = mkToggleBtn(p1, "Auto Make Honey",  nil, nil, 6)
+local btnAntiAFK,    _, toggleAntiAFK    = mkToggleBtn(p1, "Anti-AFK",         nil, nil, 7)
+local btnWarpHive,   _, toggleWarpHive, getWarpHive, setWarpHive =
+	mkToggleBtn(p1, "Auto Warp (Stuck)", "Warp ON", "Warp OFF", 8)
+
+-- Warp info card
+local warpInfoCard = Instance.new("Frame", p1)
+warpInfoCard.Size = UDim2.new(1, 0, 0, 38)
+warpInfoCard.BackgroundColor3 = C.bg3
+warpInfoCard.BorderSizePixel = 0
+warpInfoCard.LayoutOrder = 9
+makeCorner(warpInfoCard, 5)
+applyNeonStroke(warpInfoCard, 1, Color3.fromRGB(0, 60, 120))
+
+local warpIconLbl = Instance.new("TextLabel", warpInfoCard)
+warpIconLbl.Size = UDim2.new(0, 30, 1, 0)
+warpIconLbl.Position = UDim2.new(0, 4, 0, 0)
+warpIconLbl.BackgroundTransparency = 1
+warpIconLbl.Text = "🏠"
+warpIconLbl.TextSize = 16
+warpIconLbl.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json")
+
+local warpStatLbl = Instance.new("TextLabel", warpInfoCard)
+warpStatLbl.Size = UDim2.new(1, -40, 0, 18)
+warpStatLbl.Position = UDim2.new(0, 34, 0, 2)
+warpStatLbl.BackgroundTransparency = 1
+warpStatLbl.Text = "Stuck Warp  ·  Warps: 0"
+warpStatLbl.TextColor3 = C.textNeon
+warpStatLbl.TextSize = 10
+warpStatLbl.TextXAlignment = Enum.TextXAlignment.Left
+warpStatLbl.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold)
+
+local warpTimeLbl = Instance.new("TextLabel", warpInfoCard)
+warpTimeLbl.Size = UDim2.new(1, -40, 0, 14)
+warpTimeLbl.Position = UDim2.new(0, 34, 0, 21)
+warpTimeLbl.BackgroundTransparency = 1
+warpTimeLbl.Text = "Last warp: —"
+warpTimeLbl.TextColor3 = C.textMuted
+warpTimeLbl.TextSize = 8
+warpTimeLbl.TextXAlignment = Enum.TextXAlignment.Left
+warpTimeLbl.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json")
+
+-- Initialise toggle state to ON
+setWarpHive(true)
 
 --==================================================
 -- PAGE 2: FIELD
@@ -886,6 +932,10 @@ btnAntiAFK.MouseButton1Click:Connect(function()
 	CFG.AntiAFK = toggleAntiAFK()
 end)
 
+btnWarpHive.MouseButton1Click:Connect(function()
+	CFG.AutoWarpHive = toggleWarpHive()
+end)
+
 btnBooster.MouseButton1Click:Connect(function()
 	CFG.AutoBooster = toggleBooster()
 end)
@@ -1043,21 +1093,141 @@ end)
 --==================================================
 -- WATCHDOG
 --==================================================
+-- REAL-TIME STUCK WATCHDOG + AUTO WARP TO HIVE
+-- ตรวจสอบทุก 0.5 วิ — ถ้าผู้เล่นอยู่กับที่ > STUCK_TIMEOUT วิ → warp + restart
+--==================================================
+local STUCK_TIMEOUT  = 12    -- วิที่ยอมให้อยู่กับที่ก่อน warp
+local STUCK_MIN_DIST = 2.5   -- ระยะ (studs) ที่ถือว่า "ไม่ขยับ"
+local WARP_COOLDOWN  = 15    -- วินาที cooldown หลัง warp เพื่อกันวาร์ปซ้ำ
+
+-- state ใช้ใน watchdog เท่านั้น
+local W = {
+	anchorPos  = nil,   -- ตำแหน่งที่เริ่มนิ่ง
+	anchorTime = nil,   -- tick() ตอนที่เริ่มนิ่ง
+	warping    = false, -- กำลัง warp อยู่ (lock)
+}
+
+local function doWarpToHive(reason)
+	if W.warping then return end
+	local hive = S.Nodes[1]
+	if not hive then return end
+	if (tick() - S.LastWarpTick) < WARP_COOLDOWN then return end
+
+	W.warping = true
+
+	-- UI feedback
+	statusLbl.Text       = "⚡ Stuck! Warping..."
+	statusLbl.TextColor3 = C.accentOrange
+	modeLbl.Text         = reason or "Stuck → Warp"
+	modeLbl.TextColor3   = C.accentOrange
+
+	-- flash border orange
+	local stroke = win:FindFirstChildOfClass("UIStroke")
+	if stroke then
+		makeTween(stroke, {Color = C.accentOrange}, 0.15):Play()
+		task.delay(0.5, function()
+			makeTween(stroke, {Color = C.neonLine}, 0.4):Play()
+		end)
+	end
+
+	-- teleport
+	local _,_,r = getChar()
+	if r then
+		r.CFrame = CFrame.new(hive + Vector3.new(0, 4, 0))
+		print("🏠 WARP → hive | reason: " .. (reason or "stuck"))
+	end
+
+	-- reset farm state → เริ่ม node ใหม่จากต้น
+	S.NodeIdx      = 1
+	S.Converting   = false
+	S.ConvertDone  = false
+	S.ConvertStart = nil
+	S.RandomTarget = nil
+	S.RandomTick   = 0
+	S.LastWarpTick = tick()
+	S.WarpCount   += 1
+
+	-- reset watchdog anchor
+	W.anchorPos  = nil
+	W.anchorTime = nil
+
+	-- อัพ warp card
+	warpStatLbl.Text = "Stuck Warp  ·  Warps: " .. S.WarpCount
+	warpTimeLbl.Text = "Last warp: " .. os.date("%H:%M:%S")
+
+	task.wait(0.8)
+
+	statusLbl.Text       = "◉  Ready"
+	statusLbl.TextColor3 = C.accentGreen
+	modeLbl.Text         = "Mode: Collecting"
+	modeLbl.TextColor3   = C.textSub
+
+	W.warping = false
+end
+
+-- Loop หลัก: ตรวจทุก 0.5 วิ
 task.spawn(function()
 	while true do
-		task.wait(8)
-		local _,hum,root=getChar()
-		if not root or not hum or hum.Health<=0 then continue end
-		local pos=root.Position; local hive=S.Nodes[1]
-		local nearHive=hive and (pos-hive).Magnitude<8
-		if nearHive and (S.Converting or CFG.AutoHoney) then S.LastPos=pos; continue end
-		if S.LastPos and (pos-S.LastPos).Magnitude<2 then
-			S.StuckTick+=1
-			if not S.Converting then
-				S.RandomTarget=randomInField(pos.Y); S.RandomTick=0
+		task.wait(0.5)
+
+		if not CFG.AutoWarpHive then
+			W.anchorPos  = nil
+			W.anchorTime = nil
+			continue
+		end
+
+		if W.warping then continue end
+
+		local _,hum,root = getChar()
+		if not root or not hum or hum.Health <= 0 then
+			W.anchorPos  = nil
+			W.anchorTime = nil
+			continue
+		end
+
+		local pos  = root.Position
+		local hive = S.Nodes[1]
+
+		-- ยกเว้น: อยู่ข้าง hive กำลัง honey/convert → ไม่นับ
+		if hive and (pos - hive).Magnitude < 8
+			and (S.Converting or CFG.AutoHoney)
+		then
+			W.anchorPos  = nil
+			W.anchorTime = nil
+			continue
+		end
+
+		-- ยกเว้น: กำลัง boost
+		if S.IsBoosting then
+			W.anchorPos  = nil
+			W.anchorTime = nil
+			continue
+		end
+
+		-- ตรวจว่าขยับหรือเปล่า
+		if W.anchorPos == nil then
+			-- เพิ่งเริ่มติดตาม
+			W.anchorPos  = pos
+			W.anchorTime = tick()
+		elseif (pos - W.anchorPos).Magnitude > STUCK_MIN_DIST then
+			-- ขยับแล้ว → reset anchor
+			W.anchorPos  = pos
+			W.anchorTime = tick()
+		else
+			-- ยังอยู่กับที่ → ตรวจเวลา
+			local stuckFor = tick() - W.anchorTime
+			local remaining = STUCK_TIMEOUT - stuckFor
+
+			-- อัพ status bar ให้รู้ว่า countdown อยู่
+			if stuckFor > 4 then   -- แสดงหลังอยู่กับที่ 4 วิ
+				statusLbl.Text = string.format("⚠ Stuck %.0fs / %ds", stuckFor, STUCK_TIMEOUT)
+				statusLbl.TextColor3 = remaining > 4 and C.accentOrange or C.accentRed
 			end
-		else S.StuckTick=0 end
-		S.LastPos=pos
+
+			if stuckFor >= STUCK_TIMEOUT then
+				task.spawn(doWarpToHive, "Stuck > " .. STUCK_TIMEOUT .. "s")
+			end
+		end
 	end
 end)
 
