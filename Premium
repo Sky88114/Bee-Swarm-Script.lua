@@ -1,0 +1,1298 @@
+--==================================================
+-- BSS AUTO FARM v6 — ABYSS THEME
+-- TP Farm | Real Workspace Positions | Auto Hive Detect
+-- Flow: TP→Field → TP Token → Pollen Full → TP→Hive → Honey → Loop
+--==================================================
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService      = game:GetService("TweenService")
+local VIM               = game:GetService("VirtualInputManager")
+local player            = Players.LocalPlayer
+
+if player.PlayerGui:FindFirstChild("AutoFarmGui") then
+	player.PlayerGui.AutoFarmGui:Destroy()
+end
+
+--==================================================
+-- CONFIG & STATE
+--==================================================
+local CFG = {
+	Speed       = 78,
+	Jump        = 100,
+	AutoClick   = false,
+	AutoHoney   = false,
+	WarpFarm    = false,
+	AntiAFK     = false,
+	AutoBooster = false,
+	StuckWarp   = true,
+}
+
+local S = {
+	Phase        = "IDLE",
+	FieldCenter  = nil,
+	Corner1      = nil,
+	Corner2      = nil,
+	FieldPart    = nil,
+	SelectedName = nil,
+	HivePos      = nil,
+	RandomTarget = nil,
+	RandomTick   = 0,
+	IsBoosting   = false,
+	WarpCount    = 0,
+	LastWarpTick = 0,
+}
+
+--==================================================
+-- PALETTE
+--==================================================
+local C = {
+	bg          = Color3.fromRGB(6,8,14),
+	bg2         = Color3.fromRGB(10,13,22),
+	bg3         = Color3.fromRGB(14,18,30),
+	surface     = Color3.fromRGB(18,24,40),
+	neon        = Color3.fromRGB(0,180,255),
+	neonDim     = Color3.fromRGB(0,120,200),
+	neonLine    = Color3.fromRGB(0,160,230),
+	accentGreen = Color3.fromRGB(0,230,140),
+	accentOrange= Color3.fromRGB(255,160,40),
+	accentRed   = Color3.fromRGB(255,70,70),
+	tabActive   = Color3.fromRGB(0,160,220),
+	tabInactive = Color3.fromRGB(14,18,30),
+	textPrimary = Color3.new(1,1,1),
+	textSub     = Color3.fromRGB(140,180,220),
+	textMuted   = Color3.fromRGB(70,100,140),
+	textNeon    = Color3.fromRGB(0,210,255),
+	btnDefault  = Color3.fromRGB(16,22,38),
+	dropBg      = Color3.fromRGB(8,12,24),
+}
+
+--==================================================
+-- UTILITY
+--==================================================
+local function mkCorner(i,r) Instance.new("UICorner",i).CornerRadius=UDim.new(0,r or 6) end
+local function mkStroke(i,t,c)
+	local s=Instance.new("UIStroke",i); s.Thickness=t or 1; s.Color=c or C.neonLine
+	s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; return s
+end
+local function mkPad(i,all,lr,tb)
+	local p=Instance.new("UIPadding",i)
+	if all then
+		p.PaddingLeft=UDim.new(0,all);p.PaddingRight=UDim.new(0,all)
+		p.PaddingTop=UDim.new(0,all);p.PaddingBottom=UDim.new(0,all)
+	else
+		p.PaddingLeft=UDim.new(0,lr or 0);p.PaddingRight=UDim.new(0,lr or 0)
+		p.PaddingTop=UDim.new(0,tb or 0);p.PaddingBottom=UDim.new(0,tb or 0)
+	end
+end
+local function tw(o,p,d) return TweenService:Create(o,TweenInfo.new(d or 0.15,Enum.EasingStyle.Quad),p) end
+local function jitter(v,a) a=a or 1; return v+Vector3.new((math.random()-.5)*2*a,0,(math.random()-.5)*2*a) end
+local function randWait(mn,mx) task.wait(mn+math.random()*(mx-mn)) end
+
+local function tweenTo(root, targetPos, duration)
+	-- เลื่อน CFrame แบบ smooth แทน TP ตรงๆ
+	duration = duration or 0.35
+	local startCF = root.CFrame
+	local endCF   = CFrame.new(targetPos) * (startCF - startCF.Position)
+	local t0 = tick()
+	while true do
+		local alpha = math.min((tick()-t0)/duration, 1)
+		-- ease in-out quad
+		local e = alpha < 0.5 and 2*alpha*alpha or 1-(-2*alpha+2)^2/2
+		pcall(function()
+			root.CFrame = startCF:Lerp(endCF, e)
+		end)
+		if alpha >= 1 then break end
+		task.wait(0.016) -- ~60fps
+	end
+end
+
+--==================================================
+-- FIELD DATA — ตำแหน่งจาก workspace scan จริง
+-- center = ตำแหน่งจาก FlowerZones object
+-- c1/c2  = ขอบ field ±40 studs จาก center
+--==================================================
+local FIELD_META = {
+	["Sunflower Field"]    = {icon="🌻",pollen="🔴",group=1},
+	["Dandelion Field"]    = {icon="🌼",pollen="💙",group=1},
+	["Mushroom Field"]     = {icon="🍄",pollen="🔴",group=1},
+	["Blue Flower Field"]  = {icon="💐",pollen="💙",group=1},
+	["Clover Field"]       = {icon="🍀",pollen="🟣",group=1},
+	["Spider Field"]       = {icon="🕷",pollen="⚪",group=2},
+	["Strawberry Field"]   = {icon="🍓",pollen="🔴",group=2},
+	["Bamboo Field"]       = {icon="🎋",pollen="💙",group=2},
+	["Pineapple Patch"]    = {icon="🍍",pollen="🔴",group=3},
+	["Cactus Field"]       = {icon="🌵",pollen="🔴",group=3},
+	["Pumpkin Patch"]      = {icon="🎃",pollen="🔴",group=3},
+	["Pine Tree Forest"]   = {icon="🌲",pollen="💙",group=3},
+	["Rose Field"]         = {icon="🌹",pollen="🔴",group=4},
+	["Stump Field"]        = {icon="🪵",pollen="💙",group=5},
+	["Mountain Top Field"] = {icon="⛰",pollen="🟣",group=5},
+	["Pepper Patch"]       = {icon="🌶",pollen="🔴",group=5},
+	["Coconut Field"]      = {icon="🥥",pollen="⚪",group=5},
+	["Ant Field"]          = {icon="🐜",pollen="🔴",group=5},
+}
+
+local FIELD_ORDER = {
+	"Sunflower Field","Dandelion Field","Mushroom Field","Blue Flower Field","Clover Field",
+	"Spider Field","Strawberry Field","Bamboo Field",
+	"Pineapple Patch","Cactus Field","Pumpkin Patch","Pine Tree Forest",
+	"Rose Field","Stump Field","Mountain Top Field","Pepper Patch","Coconut Field","Ant Field",
+}
+
+local GROUP_LABEL = {[1]="🌱 Starter",[2]="🐝 5 Bees",[3]="🐝 10 Bees",[4]="🐝 15 Bees",[5]="🔒 Gated"}
+
+-- ตำแหน่งจาก workspace scan จริง (FlowerZones) — center เป็นค่าแท้
+-- c1/c2 ประมาณ ±40 studs แต่ถ้า scan workspace ได้จะ override
+local REAL_POSITIONS = {
+	["Mushroom Field"]     = {cx=-90,  cy=2,   cz=112,  hx=40, hz=40},
+	["Strawberry Field"]   = {cx=-178, cy=18,  cz=10,   hx=40, hz=40},
+	["Pumpkin Patch"]      = {cx=-188, cy=66,  cz=-184, hx=40, hz=40},
+	["Sunflower Field"]    = {cx=-209, cy=2,   cz=177,  hx=40, hz=40},
+	["Blue Flower Field"]  = {cx=147,  cy=2,   cz=99,   hx=40, hz=40},
+	["Mountain Top Field"] = {cx=78,   cy=174, cz=-165, hx=38, hz=38},
+	["Bamboo Field"]       = {cx=133,  cy=18,  cz=-26,  hx=40, hz=40},
+	["Spider Field"]       = {cx=-43,  cy=18,  cz=-14,  hx=38, hz=38},
+	["Pine Tree Forest"]   = {cx=-329, cy=66,  cz=-187, hx=45, hz=45},
+	["Rose Field"]         = {cx=-327, cy=18,  cz=129,  hx=40, hz=40},
+	["Cactus Field"]       = {cx=-188, cy=66,  cz=-102, hx=38, hz=38},
+	["Ant Field"]          = {cx=96,   cy=30,  cz=595,  hx=40, hz=40},
+	["Stump Field"]        = {cx=424,  cy=94,  cz=-175, hx=40, hz=40},
+	["Clover Field"]       = {cx=158,  cy=32,  cz=196,  hx=40, hz=40},
+	["Coconut Field"]      = {cx=-254, cy=69,  cz=469,  hx=40, hz=40},
+	["Pepper Patch"]       = {cx=-489, cy=121, cz=536,  hx=38, hz=38},
+	["Pineapple Patch"]    = {cx=256,  cy=66,  cz=-207, hx=40, hz=40},
+	["Dandelion Field"]    = {cx=-31,  cy=1,   cz=221,  hx=40, hz=40},
+}
+
+local FIELD_DATA = {}
+
+local function buildFieldData()
+	-- สร้างจาก REAL_POSITIONS ก่อน (ค่าจริงจาก scan)
+	for _,fname in ipairs(FIELD_ORDER) do
+		local m = FIELD_META[fname]
+		local rp = REAL_POSITIONS[fname]
+		if m then
+			local entry = {name=fname, icon=m.icon, pollen=m.pollen, group=m.group, fromWS=rp~=nil}
+			if rp then
+				entry.center = Vector3.new(rp.cx, rp.cy, rp.cz)
+				entry.c1     = Vector3.new(rp.cx-rp.hx, rp.cy, rp.cz-rp.hz)
+				entry.c2     = Vector3.new(rp.cx+rp.hx, rp.cy, rp.cz+rp.hz)
+			end
+			table.insert(FIELD_DATA, entry)
+		end
+	end
+end
+buildFieldData()
+
+local function scanFields()
+	-- override ด้วยค่า live จาก workspace ถ้าเจอ
+	local fz = workspace:FindFirstChild("FlowerZones")
+	local found = 0
+	if not fz then
+		print("⚠ FlowerZones not found in workspace"); return 0
+	end
+	for _, obj in ipairs(fz:GetChildren()) do
+		local pos = nil
+		if obj:IsA("BasePart") then
+			pos = obj.Position
+		elseif obj:IsA("Model") then
+			pcall(function() pos = obj:GetPivot().Position end)
+			if not pos then
+				local bp = obj:FindFirstChildOfClass("BasePart")
+				if bp then pos = bp.Position end
+			end
+		end
+		if pos then
+			-- หา field ใน FIELD_DATA ที่ตรงชื่อ
+			for _, fd in ipairs(FIELD_DATA) do
+				if fd.name == obj.Name then
+					local hx = 40; local hz = 40
+					-- ถ้า object มี Size ให้ใช้เลย
+					if obj:IsA("BasePart") then
+						hx = obj.Size.X/2 + 2
+						hz = obj.Size.Z/2 + 2
+					end
+					local groundY = pos.Y + 4
+					fd.center  = Vector3.new(pos.X, groundY, pos.Z)
+					fd.c1      = Vector3.new(pos.X-hx, groundY, pos.Z-hz)
+					fd.c2      = Vector3.new(pos.X+hx, groundY, pos.Z+hz)
+					fd.fromWS  = true
+					found += 1
+					break
+				end
+			end
+		end
+	end
+	print(string.format("✅ Re-scan: %d fields updated from workspace", found))
+	return found
+end
+
+task.spawn(function() task.wait(3); scanFields() end)
+
+--==================================================
+-- AUTO HIVE DETECTION
+-- หา hive object จาก workspace โดยอัตโนมัติ
+--==================================================
+local function findHiveInWorkspace()
+	local username = player.Name:lower()
+
+	-- scan workspace top-level
+	for _, obj in ipairs(workspace:GetChildren()) do
+		local n = obj.Name:lower()
+		-- ชื่อตรงกับ player หรือมี "hive"
+		if n == username or n:find("hive") then
+			local pos = nil
+			if obj:IsA("BasePart") then
+				pos = obj.Position
+			elseif obj:IsA("Model") then
+				pcall(function() pos = obj:GetPivot().Position end)
+				if not pos then
+					local bp = obj:FindFirstChildOfClass("BasePart")
+					if bp then pos = bp.Position end
+				end
+			end
+			if pos then
+				print("🏠 Auto-found hive: "..obj.Name.." @ "..tostring(pos))
+				return pos
+			end
+		end
+	end
+
+	-- วิธี 2: หา Part ชื่อ "HiveSlot" หรือ "ConverterZone" ใกล้ player
+	local root = (function()
+		local c = player.Character; if not c then return nil end
+		return c:FindFirstChild("HumanoidRootPart")
+	end)()
+
+	local bestPos, bestDist = nil, math.huge
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		local n = obj.Name:lower()
+		if obj:IsA("BasePart") and (n:find("hive") or n:find("converter") or n:find("slot")) then
+			local d = root and (root.Position - obj.Position).Magnitude or math.huge
+			if d < bestDist and d < 30 then
+				bestDist = d; bestPos = obj.Position
+			end
+		end
+	end
+	if bestPos then
+		print("🏠 Found nearby hive part @ "..tostring(bestPos))
+		return bestPos
+	end
+
+	return nil
+end
+
+--==================================================
+-- REMOTE DISCOVERY
+--==================================================
+local RE = {Honey=nil, Collect=nil, Booster=nil}
+
+local function discoverRemotes()
+	local events = ReplicatedStorage:FindFirstChild("Events")
+	if events then
+		-- ใช้ชื่อตรงๆ จาก scan
+		RE.Collect = events:FindFirstChild("ToolCollect")
+		RE.Honey   = events:FindFirstChild("NectarCondenser")
+		            or events:FindFirstChild("MakeHoney")
+		            or events:FindFirstChild("HiveConvert")
+		-- scan หา booster
+		for _, r in ipairs(events:GetChildren()) do
+			local n = r.Name:lower()
+			if not RE.Booster and n:find("boost") then RE.Booster = r end
+			if not RE.Honey and (n:find("honey") or n:find("convert") or n:find("nectar")) then RE.Honey = r end
+		end
+	end
+	-- fallback: scan ทั้งหมด
+	if not RE.Collect or not RE.Honey then
+		for _, r in ipairs(ReplicatedStorage:GetDescendants()) do
+			if not r:IsA("RemoteEvent") then continue end
+			local n = r.Name:lower()
+			if not RE.Collect and (n=="toolcollect" or n:find("collect") or n=="petalcollected") then RE.Collect=r end
+			if not RE.Honey and (n:find("nectar") or n:find("honey") or n:find("convert")) then RE.Honey=r end
+			if not RE.Booster and n:find("boost") then RE.Booster=r end
+		end
+	end
+	print(string.format("🔌 Collect=%s | Honey=%s",
+		RE.Collect and RE.Collect.Name or "NIL❌",
+		RE.Honey   and RE.Honey.Name   or "NIL❌"))
+end
+task.spawn(function() task.wait(2); discoverRemotes() end)
+
+local function safeFireServer(remote,...)
+	if not remote or not remote.Parent then return false end
+	local args = {...}
+	return pcall(function() remote:FireServer(table.unpack(args)) end)
+end
+
+--==================================================
+-- GUI ROOT
+--==================================================
+local gui = Instance.new("ScreenGui"); gui.Name="AutoFarmGui"
+gui.ResetOnSpawn=false; gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+gui.Parent = player.PlayerGui
+
+local win = Instance.new("Frame",gui); win.Name="Window"
+win.Size=UDim2.new(0,300,0,430); win.Position=UDim2.new(0,20,0,60)
+win.BackgroundColor3=C.bg; win.BorderSizePixel=0
+mkCorner(win,10); mkStroke(win,1.5,C.neonLine)
+
+-- Title Bar
+local titleBar=Instance.new("Frame",win); titleBar.Size=UDim2.new(1,0,0,44)
+titleBar.BackgroundColor3=C.bg2; titleBar.BorderSizePixel=0; mkCorner(titleBar,10)
+local tm=Instance.new("Frame",titleBar); tm.Size=UDim2.new(1,0,0,10); tm.Position=UDim2.new(0,0,1,-10)
+tm.BackgroundColor3=C.bg2; tm.BorderSizePixel=0
+local tl=Instance.new("Frame",titleBar); tl.Size=UDim2.new(1,0,0,1); tl.Position=UDim2.new(0,0,1,-1)
+tl.BackgroundColor3=C.neon; tl.BorderSizePixel=0
+
+local statusDot=Instance.new("Frame",titleBar); statusDot.Size=UDim2.new(0,8,0,8)
+statusDot.Position=UDim2.new(0,12,0.5,-4); statusDot.BackgroundColor3=C.accentGreen
+statusDot.BorderSizePixel=0; mkCorner(statusDot,4)
+
+local titleTxt=Instance.new("TextLabel",titleBar); titleTxt.Size=UDim2.new(1,-80,1,0)
+titleTxt.Position=UDim2.new(0,28,0,0); titleTxt.BackgroundTransparency=1
+titleTxt.Text="BSS  AUTO FARM"; titleTxt.TextColor3=C.textNeon; titleTxt.TextSize=13
+titleTxt.TextXAlignment=Enum.TextXAlignment.Left
+titleTxt.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+
+local verTxt=Instance.new("TextLabel",titleBar); verTxt.Size=UDim2.new(0,60,1,0)
+verTxt.Position=UDim2.new(1,-68,0,0); verTxt.BackgroundTransparency=1
+verTxt.Text="v6  ◈"; verTxt.TextColor3=C.textMuted; verTxt.TextSize=10
+verTxt.TextXAlignment=Enum.TextXAlignment.Right
+verTxt.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+
+-- Drag
+do
+	local drag,ds,sp=false,nil,nil
+	titleBar.InputBegan:Connect(function(i)
+		if i.UserInputType==Enum.UserInputType.MouseButton1 then drag=true;ds=i.Position;sp=win.Position end
+	end)
+	titleBar.InputEnded:Connect(function(i)
+		if i.UserInputType==Enum.UserInputType.MouseButton1 then drag=false end
+	end)
+	UserInputService.InputChanged:Connect(function(i)
+		if drag and i.UserInputType==Enum.UserInputType.MouseMovement then
+			local d=i.Position-ds
+			win.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y)
+		end
+	end)
+end
+
+-- Status Bar
+local statusBar=Instance.new("Frame",win); statusBar.Size=UDim2.new(1,-16,0,28)
+statusBar.Position=UDim2.new(0,8,0,50); statusBar.BackgroundColor3=C.bg3; statusBar.BorderSizePixel=0
+mkCorner(statusBar,5); mkStroke(statusBar,1,Color3.fromRGB(20,40,70))
+local sbL=Instance.new("UIListLayout",statusBar); sbL.FillDirection=Enum.FillDirection.Horizontal
+sbL.VerticalAlignment=Enum.VerticalAlignment.Center; mkPad(statusBar,nil,8,0)
+
+local statusLbl=Instance.new("TextLabel",statusBar); statusLbl.Size=UDim2.new(0.55,0,1,0)
+statusLbl.BackgroundTransparency=1; statusLbl.Text="◉  Ready"; statusLbl.TextColor3=C.accentGreen
+statusLbl.TextSize=10; statusLbl.TextXAlignment=Enum.TextXAlignment.Left
+statusLbl.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+
+local pollenLbl=Instance.new("TextLabel",statusBar); pollenLbl.Size=UDim2.new(0.45,0,1,0)
+pollenLbl.BackgroundTransparency=1; pollenLbl.Text="🌼  --/--"; pollenLbl.TextColor3=C.textSub
+pollenLbl.TextSize=10; pollenLbl.TextXAlignment=Enum.TextXAlignment.Right
+pollenLbl.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+
+local modeLbl=Instance.new("TextLabel",win); modeLbl.Size=UDim2.new(1,-16,0,18)
+modeLbl.Position=UDim2.new(0,8,0,82); modeLbl.BackgroundTransparency=1
+modeLbl.Text="Phase: Idle"; modeLbl.TextColor3=C.textMuted; modeLbl.TextSize=9
+modeLbl.TextXAlignment=Enum.TextXAlignment.Left
+modeLbl.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+
+-- Tab Bar
+local TAB_NAMES={"MAIN","FIELD","FARM","BOOST"}
+local TAB_ICONS={"⚙","🌿","🚀","⚡"}
+local tabButtons,tabPages={},{}
+
+local tabBar=Instance.new("Frame",win); tabBar.Size=UDim2.new(1,-16,0,30)
+tabBar.Position=UDim2.new(0,8,0,103); tabBar.BackgroundColor3=C.bg3; tabBar.BorderSizePixel=0
+mkCorner(tabBar,6); mkStroke(tabBar,1,Color3.fromRGB(15,25,50))
+local tabL=Instance.new("UIListLayout",tabBar); tabL.FillDirection=Enum.FillDirection.Horizontal
+tabL.Padding=UDim.new(0,2); mkPad(tabBar,nil,2,2)
+
+local contentArea=Instance.new("Frame",win); contentArea.Size=UDim2.new(1,-16,0,280)
+contentArea.Position=UDim2.new(0,8,0,138); contentArea.BackgroundTransparency=1
+contentArea.ClipsDescendants=true
+
+local function createTabPage()
+	local p=Instance.new("ScrollingFrame",contentArea); p.Size=UDim2.new(1,0,1,0)
+	p.BackgroundTransparency=1; p.BorderSizePixel=0; p.ScrollBarThickness=2
+	p.ScrollBarImageColor3=C.neonDim; p.CanvasSize=UDim2.new(0,0,0,0)
+	p.AutomaticCanvasSize=Enum.AutomaticSize.Y; p.Visible=false
+	local l=Instance.new("UIListLayout",p); l.Padding=UDim.new(0,5); l.SortOrder=Enum.SortOrder.LayoutOrder
+	return p
+end
+
+for i,name in ipairs(TAB_NAMES) do
+	local btn=Instance.new("TextButton",tabBar); btn.Size=UDim2.new(0.25,-2,1,0)
+	btn.BackgroundColor3=i==1 and C.tabActive or C.tabInactive
+	btn.TextColor3=i==1 and C.textPrimary or C.textMuted; btn.BorderSizePixel=0
+	btn.Text=TAB_ICONS[i].." "..name; btn.TextSize=9; btn.LayoutOrder=i
+	btn.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	mkCorner(btn,4); if i==1 then mkStroke(btn,1,C.neon) end
+	tabButtons[i]=btn; tabPages[i]=createTabPage()
+	btn.MouseButton1Click:Connect(function()
+		for j,tb in ipairs(tabButtons) do
+			local on=(j==i); tw(tb,{BackgroundColor3=on and C.tabActive or C.tabInactive},0.15):Play()
+			tb.TextColor3=on and C.textPrimary or C.textMuted
+			local st=tb:FindFirstChildOfClass("UIStroke"); if st then st:Destroy() end
+			if on then mkStroke(tb,1,C.neon) end; tabPages[j].Visible=on
+		end
+	end)
+end
+tabPages[1].Visible=true
+
+--==================================================
+-- ELEMENT BUILDERS
+--==================================================
+local function secHdr(parent,text,icon,lo)
+	local f=Instance.new("Frame",parent); f.Size=UDim2.new(1,0,0,22)
+	f.BackgroundColor3=Color3.fromRGB(8,14,28); f.BorderSizePixel=0; f.LayoutOrder=lo or 0
+	mkCorner(f,4); mkStroke(f,1,Color3.fromRGB(0,80,130))
+	local ln=Instance.new("Frame",f); ln.Size=UDim2.new(0,2,0.7,0); ln.Position=UDim2.new(0,6,0.15,0)
+	ln.BackgroundColor3=C.neon; ln.BorderSizePixel=0; mkCorner(ln,1)
+	local lbl=Instance.new("TextLabel",f); lbl.Size=UDim2.new(1,-16,1,0); lbl.Position=UDim2.new(0,14,0,0)
+	lbl.BackgroundTransparency=1; lbl.Text=(icon and icon.." " or "")..string.upper(text)
+	lbl.TextColor3=C.textNeon; lbl.TextSize=9; lbl.TextXAlignment=Enum.TextXAlignment.Left
+	lbl.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	return f
+end
+
+local _lo=0
+local function nO() _lo=_lo+1; return _lo end
+
+local function mkToggle(parent,text,onT,offT,lo)
+	local isOn=false
+	local b=Instance.new("TextButton",parent); b.Size=UDim2.new(1,0,0,30)
+	b.BackgroundColor3=C.btnDefault; b.TextColor3=C.textSub; b.BorderSizePixel=0
+	b.Text="  ○  "..(offT or text).."  :  OFF"; b.TextSize=11
+	b.TextXAlignment=Enum.TextXAlignment.Left; b.LayoutOrder=lo or nO()
+	b.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	mkCorner(b,5); mkStroke(b,1,Color3.fromRGB(20,35,60)); mkPad(b,nil,8,0)
+	local pill=Instance.new("Frame",b); pill.Size=UDim2.new(0,36,0,16); pill.Position=UDim2.new(1,-44,0.5,-8)
+	pill.BackgroundColor3=Color3.fromRGB(30,40,60); pill.BorderSizePixel=0; mkCorner(pill,8)
+	local pt=Instance.new("TextLabel",pill); pt.Size=UDim2.new(1,0,1,0); pt.BackgroundTransparency=1
+	pt.Text="OFF"; pt.TextColor3=C.textMuted; pt.TextSize=8
+	pt.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	local function refresh()
+		if isOn then
+			tw(b,{BackgroundColor3=Color3.fromRGB(0,30,55)},0.15):Play()
+			local st=b:FindFirstChildOfClass("UIStroke"); if st then tw(st,{Color=C.neon},0.15):Play() end
+			b.TextColor3=C.textNeon; b.Text="  ●  "..(onT or text).."  :  ON"
+			tw(pill,{BackgroundColor3=C.neon},0.15):Play(); pt.TextColor3=C.bg; pt.Text="ON"
+		else
+			tw(b,{BackgroundColor3=C.btnDefault},0.15):Play()
+			local st=b:FindFirstChildOfClass("UIStroke"); if st then tw(st,{Color=Color3.fromRGB(20,35,60)},0.15):Play() end
+			b.TextColor3=C.textSub; b.Text="  ○  "..(offT or text).."  :  OFF"
+			tw(pill,{BackgroundColor3=Color3.fromRGB(30,40,60)},0.15):Play(); pt.TextColor3=C.textMuted; pt.Text="OFF"
+		end
+	end
+	return b,pill,function() isOn=not isOn; refresh(); return isOn end,function() return isOn end,function(v) isOn=v; refresh() end
+end
+
+local function mkHalf(parent,tA,cA,tB,cB,lo)
+	local row=Instance.new("Frame",parent); row.Size=UDim2.new(1,0,0,30)
+	row.BackgroundTransparency=1; row.LayoutOrder=lo or nO()
+	local rl=Instance.new("UIListLayout",row); rl.FillDirection=Enum.FillDirection.Horizontal; rl.Padding=UDim.new(0,5)
+	local function mkB(t,c,l2)
+		local b=Instance.new("TextButton",row); b.Size=UDim2.new(0.5,-3,1,0)
+		b.BackgroundColor3=c or C.btnDefault; b.TextColor3=C.textPrimary; b.BorderSizePixel=0
+		b.Text=t; b.TextSize=10; b.LayoutOrder=l2
+		b.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+		mkCorner(b,5); mkStroke(b,1,c or Color3.fromRGB(20,35,60)); return b
+	end
+	return row,mkB(tA,cA,1),mkB(tB,cB,2)
+end
+
+local function mkInput(parent,label,default,lo)
+	local card=Instance.new("Frame",parent); card.Size=UDim2.new(1,0,0,46)
+	card.BackgroundColor3=C.bg3; card.BorderSizePixel=0; card.LayoutOrder=lo or nO()
+	mkCorner(card,5); mkStroke(card,1,Color3.fromRGB(15,25,50))
+	local lbl=Instance.new("TextLabel",card); lbl.Size=UDim2.new(1,-8,0,18); lbl.Position=UDim2.new(0,8,0,3)
+	lbl.BackgroundTransparency=1; lbl.Text=label; lbl.TextColor3=C.textMuted; lbl.TextSize=9
+	lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+	local box=Instance.new("TextBox",card); box.Size=UDim2.new(1,-12,0,20); box.Position=UDim2.new(0,6,0,22)
+	box.BackgroundColor3=C.surface; box.TextColor3=C.textNeon; box.BorderSizePixel=0
+	box.Text=tostring(default); box.TextSize=11
+	box.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	mkCorner(box,4); mkStroke(box,1,C.neonDim); return box
+end
+
+local function mkInfoCard(parent,lo)
+	local card=Instance.new("Frame",parent); card.Size=UDim2.new(1,0,0,28)
+	card.BackgroundColor3=C.bg3; card.BorderSizePixel=0; card.LayoutOrder=lo or nO()
+	mkCorner(card,5); mkStroke(card,1,Color3.fromRGB(15,25,50))
+	local lbl=Instance.new("TextLabel",card); lbl.Size=UDim2.new(1,-12,1,0); lbl.Position=UDim2.new(0,8,0,0)
+	lbl.BackgroundTransparency=1; lbl.TextColor3=C.textSub; lbl.TextSize=9
+	lbl.TextXAlignment=Enum.TextXAlignment.Left
+	lbl.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json"); return card,lbl
+end
+
+--==================================================
+-- PAGE 1: MAIN
+--==================================================
+local p1=tabPages[1]
+secHdr(p1,"Settings","⚙",1)
+local speedBox=mkInput(p1,"WALK SPEED",CFG.Speed,2)
+local jumpBox=mkInput(p1,"JUMP POWER",CFG.Jump,3)
+secHdr(p1,"Automation","🤖",4)
+local btnAutoClick,_,toggleAutoClick=mkToggle(p1,"Auto Click",nil,nil,5)
+local btnHoney,_,toggleHoney=mkToggle(p1,"Auto Make Honey",nil,nil,6)
+local btnAntiAFK,_,toggleAntiAFK=mkToggle(p1,"Anti-AFK",nil,nil,7)
+secHdr(p1,"Stuck Recovery","🏠",8)
+local btnStuck,_,toggleStuck,_,setStuck=mkToggle(p1,"Stuck Warp","Warp ON","Warp OFF",9)
+setStuck(true)
+local _,warpLbl=mkInfoCard(p1,10)
+warpLbl.Text="🏠  Warps: 0  |  Last: —"
+
+--==================================================
+-- PAGE 2: FIELD (Dropdown)
+--==================================================
+local p2=tabPages[2]
+secHdr(p2,"Field Selector","🌿",1)
+
+local activeCard=Instance.new("Frame",p2); activeCard.Size=UDim2.new(1,0,0,38)
+activeCard.BackgroundColor3=C.bg3; activeCard.BorderSizePixel=0; activeCard.LayoutOrder=2
+mkCorner(activeCard,6); mkStroke(activeCard,1.5,C.neon)
+local activeIcon=Instance.new("TextLabel",activeCard); activeIcon.Size=UDim2.new(0,30,1,0)
+activeIcon.Position=UDim2.new(0,6,0,0); activeIcon.BackgroundTransparency=1
+activeIcon.Text="🗺"; activeIcon.TextSize=18
+activeIcon.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+local activeName=Instance.new("TextLabel",activeCard); activeName.Size=UDim2.new(1,-90,1,0)
+activeName.Position=UDim2.new(0,36,0,0); activeName.BackgroundTransparency=1
+activeName.Text="No field selected"; activeName.TextColor3=C.textMuted; activeName.TextSize=11
+activeName.TextXAlignment=Enum.TextXAlignment.Left
+activeName.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+local clrFieldBtn=Instance.new("TextButton",activeCard); clrFieldBtn.Size=UDim2.new(0,40,0,22)
+clrFieldBtn.Position=UDim2.new(1,-46,0.5,-11); clrFieldBtn.BackgroundColor3=Color3.fromRGB(50,12,12)
+clrFieldBtn.TextColor3=C.accentRed; clrFieldBtn.BorderSizePixel=0; clrFieldBtn.Text="✕ CLR"
+clrFieldBtn.TextSize=8; clrFieldBtn.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+mkCorner(clrFieldBtn,4); mkStroke(clrFieldBtn,1,C.accentRed)
+
+local dropBtn=Instance.new("TextButton",p2); dropBtn.Size=UDim2.new(1,0,0,34)
+dropBtn.BackgroundColor3=Color3.fromRGB(0,25,50); dropBtn.TextColor3=C.textNeon
+dropBtn.BorderSizePixel=0; dropBtn.Text="▾  Select Field..."
+dropBtn.TextSize=11; dropBtn.TextXAlignment=Enum.TextXAlignment.Left; dropBtn.LayoutOrder=3
+dropBtn.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+mkCorner(dropBtn,6); mkStroke(dropBtn,1.5,C.neon); mkPad(dropBtn,nil,12,0)
+
+local dropOverlay=Instance.new("Frame",gui); dropOverlay.Size=UDim2.new(0,276,0,0)
+dropOverlay.BackgroundColor3=C.dropBg; dropOverlay.BorderSizePixel=0
+dropOverlay.Visible=false; dropOverlay.ZIndex=100; dropOverlay.ClipsDescendants=true
+mkCorner(dropOverlay,8); mkStroke(dropOverlay,1.5,C.neon)
+local dropScroll=Instance.new("ScrollingFrame",dropOverlay); dropScroll.Size=UDim2.new(1,-4,1,0)
+dropScroll.Position=UDim2.new(0,2,0,2); dropScroll.BackgroundTransparency=1
+dropScroll.BorderSizePixel=0; dropScroll.ScrollBarThickness=3
+dropScroll.ScrollBarImageColor3=C.neonDim; dropScroll.CanvasSize=UDim2.new(0,0,0,0)
+dropScroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; dropScroll.ZIndex=101
+local dropLayout=Instance.new("UIListLayout",dropScroll); dropLayout.Padding=UDim.new(0,2); mkPad(dropScroll,nil,0,2)
+
+local dropOpen=false; local currentFd=nil; local coordLbl=nil
+
+local function applyField(fd)
+	if not fd or not fd.center then
+		statusLbl.Text="⚠ No position"; statusLbl.TextColor3=C.accentOrange; return
+	end
+	currentFd=fd
+	S.Corner1=fd.c1; S.Corner2=fd.c2; S.FieldCenter=fd.center; S.SelectedName=fd.name
+	if S.FieldPart then pcall(function() S.FieldPart:Destroy() end) end
+	pcall(function()
+		local c1,c2=fd.c1,fd.c2; local cv=(c1+c2)/2
+		local p=Instance.new("Part"); p.Anchored=true; p.CanCollide=false; p.Transparency=0.88
+		p.Material=Enum.Material.Neon; p.Color=fd.fromWS and Color3.fromRGB(0,230,140) or C.neon
+		p.Size=Vector3.new(math.abs(c1.X-c2.X),20,math.abs(c1.Z-c2.Z))
+		p.Position=Vector3.new(cv.X,fd.center.Y+10,cv.Z); p.Parent=workspace; S.FieldPart=p
+	end)
+	activeIcon.Text=fd.icon; activeName.Text=fd.icon.."  "..fd.name
+	activeName.TextColor3=fd.fromWS and C.accentGreen or C.textNeon
+	dropBtn.Text="▾  "..fd.icon.."  "..fd.name; dropBtn.TextColor3=fd.fromWS and C.accentGreen or C.textNeon
+	if coordLbl then
+		local badge = fd.fromWS and "🟢" or "🔵"
+		coordLbl.Text=string.format("%s (%.0f, %.0f, %.0f)", badge, fd.center.X, fd.center.Y, fd.center.Z)
+	end
+	if CFG.WarpFarm then S.Phase="IDLE" end
+	print(string.format("🌿 Field: %s → center=(%.0f,%.0f,%.0f)", fd.name, fd.center.X, fd.center.Y, fd.center.Z))
+end
+
+local function closeDropdown()
+	dropOpen=false; tw(dropOverlay,{Size=UDim2.new(0,276,0,0)},0.18):Play()
+	task.delay(0.2,function() dropOverlay.Visible=false end)
+	if S.SelectedName then dropBtn.Text="▾  "..S.SelectedName else dropBtn.Text="▾  Select Field..." end
+end
+
+local function openDropdown()
+	local abs=dropBtn.AbsolutePosition; local sz=dropBtn.AbsoluteSize
+	dropOverlay.Position=UDim2.new(0,abs.X,0,abs.Y+sz.Y+4)
+	dropOverlay.Size=UDim2.new(0,276,0,0); dropOverlay.Visible=true; dropOpen=true; task.wait()
+	local h=math.min(260,dropLayout.AbsoluteContentSize.Y+8)
+	tw(dropOverlay,{Size=UDim2.new(0,276,0,h)},0.2):Play()
+	dropBtn.Text="▴  Select Field..."
+end
+
+local lastGrp=nil
+for i,fd in ipairs(FIELD_DATA) do
+	if fd.group~=lastGrp then
+		lastGrp=fd.group
+		local gh=Instance.new("TextLabel",dropScroll); gh.Size=UDim2.new(1,0,0,16)
+		gh.BackgroundTransparency=1; gh.Text=GROUP_LABEL[fd.group] or "Group"
+		gh.TextColor3=C.textMuted; gh.TextSize=8; gh.TextXAlignment=Enum.TextXAlignment.Center
+		gh.LayoutOrder=i*10-1; gh.ZIndex=102
+		gh.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	end
+	local noPos=not fd.center
+	local item=Instance.new("TextButton",dropScroll); item.Size=UDim2.new(1,0,0,28)
+	item.BackgroundColor3=noPos and Color3.fromRGB(20,10,10) or Color3.fromRGB(12,18,36)
+	item.TextColor3=C.textSub; item.BorderSizePixel=0; item.Text=""; item.LayoutOrder=i*10; item.ZIndex=102; mkCorner(item,5)
+	local iI=Instance.new("TextLabel",item); iI.Size=UDim2.new(0,24,1,0); iI.Position=UDim2.new(0,6,0,0)
+	iI.BackgroundTransparency=1; iI.Text=fd.icon; iI.TextSize=13; iI.ZIndex=103; iI.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+	local iN=Instance.new("TextLabel",item); iN.Size=UDim2.new(1,-68,1,0); iN.Position=UDim2.new(0,30,0,0)
+	iN.BackgroundTransparency=1; iN.Text=fd.name; iN.TextColor3=noPos and C.textMuted or C.textSub
+	iN.TextSize=10; iN.TextXAlignment=Enum.TextXAlignment.Left; iN.ZIndex=103
+	iN.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	local iB=Instance.new("TextLabel",item); iB.Size=UDim2.new(0,28,1,0); iB.Position=UDim2.new(1,-42,0,0)
+	iB.BackgroundTransparency=1; iB.Text=noPos and "❌" or (fd.fromWS and "🟢" or "🔵"); iB.TextSize=10; iB.ZIndex=103
+	iB.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+	local iP=Instance.new("TextLabel",item); iP.Size=UDim2.new(0,16,1,0); iP.Position=UDim2.new(1,-18,0,0)
+	iP.BackgroundTransparency=1; iP.Text=fd.pollen; iP.TextSize=12; iP.ZIndex=103
+	iP.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+	item.MouseButton1Click:Connect(function()
+		if noPos then statusLbl.Text="⚠ No pos: "..fd.name; statusLbl.TextColor3=C.accentOrange; closeDropdown(); return end
+		applyField(fd); closeDropdown()
+	end)
+	item.MouseEnter:Connect(function()
+		if not noPos then tw(item,{BackgroundColor3=Color3.fromRGB(0,35,70)},0.1):Play(); iN.TextColor3=C.textNeon end
+	end)
+	item.MouseLeave:Connect(function()
+		tw(item,{BackgroundColor3=noPos and Color3.fromRGB(20,10,10) or Color3.fromRGB(12,18,36)},0.1):Play()
+		iN.TextColor3=noPos and C.textMuted or C.textSub
+	end)
+end
+
+dropBtn.MouseButton1Click:Connect(function() if dropOpen then closeDropdown() else openDropdown() end end)
+clrFieldBtn.MouseButton1Click:Connect(function()
+	S.Corner1=nil;S.Corner2=nil;S.FieldCenter=nil;S.SelectedName=nil;currentFd=nil
+	if S.FieldPart then pcall(function() S.FieldPart:Destroy() end);S.FieldPart=nil end
+	activeName.Text="No field selected"; activeName.TextColor3=C.textMuted; activeIcon.Text="🗺"
+	dropBtn.Text="▾  Select Field..."; dropBtn.TextColor3=C.textNeon
+	if CFG.WarpFarm then S.Phase="IDLE" end
+end)
+UserInputService.InputBegan:Connect(function(i)
+	if i.UserInputType==Enum.UserInputType.MouseButton1 and dropOpen then
+		local mp=UserInputService:GetMouseLocation()
+		local dp=dropOverlay.AbsolutePosition; local ds=dropOverlay.AbsoluteSize
+		local onOverlay=mp.X>=dp.X and mp.X<=dp.X+ds.X and mp.Y>=dp.Y and mp.Y<=dp.Y+ds.Y
+		local onBtn=mp.X>=dropBtn.AbsolutePosition.X and mp.X<=dropBtn.AbsolutePosition.X+dropBtn.AbsoluteSize.X
+		         and mp.Y>=dropBtn.AbsolutePosition.Y and mp.Y<=dropBtn.AbsolutePosition.Y+dropBtn.AbsoluteSize.Y
+		if not onOverlay and not onBtn then closeDropdown() end
+	end
+end)
+
+secHdr(p2,"Position Info","📍",4)
+local _,_coordLbl=mkInfoCard(p2,5); coordLbl=_coordLbl
+coordLbl.Text="🟢 ใช้ตำแหน่งจาก workspace scan จริง"
+
+local rescanBtn=Instance.new("TextButton",p2); rescanBtn.Size=UDim2.new(1,0,0,30)
+rescanBtn.BackgroundColor3=Color3.fromRGB(0,20,45); rescanBtn.TextColor3=C.textNeon
+rescanBtn.BorderSizePixel=0; rescanBtn.Text="🔍  Re-Scan Workspace Fields"
+rescanBtn.TextSize=10; rescanBtn.TextXAlignment=Enum.TextXAlignment.Center; rescanBtn.LayoutOrder=6
+rescanBtn.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+mkCorner(rescanBtn,5); mkStroke(rescanBtn,1,C.neonDim)
+rescanBtn.MouseButton1Click:Connect(function()
+	rescanBtn.Text="⏳  Scanning..."; rescanBtn.TextColor3=C.accentOrange
+	task.spawn(function()
+		local n=scanFields(); task.wait(0.1)
+		rescanBtn.Text=string.format("✓  %d/18 updated",n); rescanBtn.TextColor3=C.accentGreen
+		if currentFd then for _,fd in ipairs(FIELD_DATA) do if fd.name==currentFd.name then applyField(fd);break end end end
+		task.delay(3,function()
+			if rescanBtn and rescanBtn.Parent then
+				rescanBtn.Text="🔍  Re-Scan Workspace Fields"; rescanBtn.TextColor3=C.textNeon
+			end
+		end)
+	end)
+end)
+
+local badgeHint=Instance.new("Frame",p2); badgeHint.Size=UDim2.new(1,0,0,28)
+badgeHint.BackgroundColor3=Color3.fromRGB(6,14,28); badgeHint.BorderSizePixel=0; badgeHint.LayoutOrder=7
+mkCorner(badgeHint,5); mkStroke(badgeHint,1,Color3.fromRGB(0,50,90))
+local bh=Instance.new("TextLabel",badgeHint); bh.Size=UDim2.new(1,-12,1,0); bh.Position=UDim2.new(0,8,0,0)
+bh.BackgroundTransparency=1; bh.Text="🟢 Workspace จริง  |  🔵 Fallback estimate"
+bh.TextColor3=C.textMuted; bh.TextSize=8.5; bh.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+
+--==================================================
+-- PAGE 3: FARM
+--==================================================
+local p3=tabPages[3]
+secHdr(p3,"Warp Farm","🚀",1)
+local btnWarpFarm,_,toggleWarpFarm=mkToggle(p3,"Warp Farm","FARMING ON","FARMING OFF",2)
+
+secHdr(p3,"Hive Position","🏠",3)
+-- ปุ่มแถว: Auto Detect | Set Manual | Clear
+local hiveRow=Instance.new("Frame",p3); hiveRow.Size=UDim2.new(1,0,0,30)
+hiveRow.BackgroundTransparency=1; hiveRow.BorderSizePixel=0; hiveRow.LayoutOrder=4
+local hiveRowL=Instance.new("UIListLayout",hiveRow); hiveRowL.FillDirection=Enum.FillDirection.Horizontal; hiveRowL.Padding=UDim.new(0,4)
+local function mkHiveBtn(t,c,w,lo)
+	local b=Instance.new("TextButton",hiveRow); b.Size=UDim2.new(w,-2,1,0)
+	b.BackgroundColor3=c; b.TextColor3=C.textPrimary; b.BorderSizePixel=0
+	b.Text=t; b.TextSize=9; b.LayoutOrder=lo
+	b.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	mkCorner(b,5); return b
+end
+local btnAutoHive = mkHiveBtn("🔍 Auto Detect", Color3.fromRGB(0,40,80),  0.4, 1)
+local btnSetHive  = mkHiveBtn("📍 Set Here",    Color3.fromRGB(0,50,20),  0.35, 2)
+local btnClrHive  = mkHiveBtn("✕",              Color3.fromRGB(50,12,12), 0.25, 3)
+mkStroke(btnAutoHive,1,C.neon); mkStroke(btnSetHive,1,C.accentGreen); mkStroke(btnClrHive,1,C.accentRed)
+
+local _,hiveLbl=mkInfoCard(p3,5); hiveLbl.Text="Hive: Not Set"
+
+secHdr(p3,"Stats","📊",6)
+local _,cycleLbl=mkInfoCard(p3,7); local _,honeyLbl=mkInfoCard(p3,8)
+cycleLbl.Text="Cycles: 0"; honeyLbl.Text="Honey sessions: 0"
+
+local tipCard=Instance.new("Frame",p3); tipCard.Size=UDim2.new(1,0,0,52)
+tipCard.BackgroundColor3=Color3.fromRGB(8,16,32); tipCard.BorderSizePixel=0; tipCard.LayoutOrder=9
+mkCorner(tipCard,5); mkStroke(tipCard,1,Color3.fromRGB(0,60,100))
+local tipLbl=Instance.new("TextLabel",tipCard); tipLbl.Size=UDim2.new(1,-12,1,0); tipLbl.Position=UDim2.new(0,8,0,0)
+tipLbl.BackgroundTransparency=1; tipLbl.TextColor3=C.textMuted; tipLbl.TextSize=8.5; tipLbl.TextWrapped=true
+tipLbl.TextXAlignment=Enum.TextXAlignment.Left; tipLbl.TextYAlignment=Enum.TextYAlignment.Center
+tipLbl.Text="1. FIELD → เลือก field\n2. ยืนข้าง hive → 🔍 Auto Detect หรือ 📍 Set Here\n3. เปิด Warp Farm"
+tipLbl.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+
+--==================================================
+-- PAGE 4: BOOST
+--==================================================
+local p4=tabPages[4]
+secHdr(p4,"Auto Field Booster","⚡",1)
+local btnBooster,_,toggleBooster=mkToggle(p4,"Auto Booster",nil,nil,2)
+secHdr(p4,"Booster Status","🔋",3)
+local BOOSTERS={
+	{name="Blue Field Booster",pos=Vector3.new(271,65,82),   label="BLUE", color=Color3.fromRGB(0,50,140)},
+	{name="Red Field Booster", pos=Vector3.new(-316,28,243), label="RED",  color=Color3.fromRGB(100,15,15)},
+	{name="Field Booster",     pos=Vector3.new(-40,184,-190),label="MOUNT",color=Color3.fromRGB(20,70,20)},
+}
+local BOOSTER_CD=45*60; local lastUsed={}; local bCards={}
+for i,b in ipairs(BOOSTERS) do
+	local card=Instance.new("Frame",p4); card.Size=UDim2.new(1,0,0,44)
+	card.BackgroundColor3=C.bg3; card.BorderSizePixel=0; card.LayoutOrder=3+i
+	mkCorner(card,5); mkStroke(card,1,b.color)
+	local acc=Instance.new("Frame",card); acc.Size=UDim2.new(0,3,1,-8); acc.Position=UDim2.new(0,0,0,4)
+	acc.BackgroundColor3=b.color; acc.BorderSizePixel=0; mkCorner(acc,2)
+	local nL=Instance.new("TextLabel",card); nL.Size=UDim2.new(0.6,0,0,22); nL.Position=UDim2.new(0,10,0,2)
+	nL.BackgroundTransparency=1; nL.Text=b.label.." BOOSTER"; nL.TextColor3=C.textPrimary; nL.TextSize=10
+	nL.TextXAlignment=Enum.TextXAlignment.Left; nL.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	local tL=Instance.new("TextLabel",card); tL.Size=UDim2.new(1,-12,0,18); tL.Position=UDim2.new(0,10,0,23)
+	tL.BackgroundTransparency=1; tL.Text="✅ READY"; tL.TextColor3=C.accentGreen; tL.TextSize=9
+	tL.TextXAlignment=Enum.TextXAlignment.Left; tL.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+	local sP=Instance.new("Frame",card); sP.Size=UDim2.new(0,48,0,18); sP.Position=UDim2.new(1,-54,0.5,-9)
+	sP.BackgroundColor3=C.accentGreen; sP.BorderSizePixel=0; mkCorner(sP,9)
+	local sT=Instance.new("TextLabel",sP); sT.Size=UDim2.new(1,0,1,0); sT.BackgroundTransparency=1
+	sT.Text="READY"; sT.TextColor3=C.bg; sT.TextSize=8
+	sT.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold)
+	bCards[i]={timeLbl=tL,statPill=sP,statTxt=sT,defColor=b.color}
+end
+
+-- Hint bar
+local hintBar=Instance.new("Frame",win); hintBar.Size=UDim2.new(1,-16,0,18); hintBar.Position=UDim2.new(0,8,1,-24)
+hintBar.BackgroundTransparency=1
+local hl=Instance.new("Frame",hintBar); hl.Size=UDim2.new(1,0,0,1); hl.BackgroundColor3=Color3.fromRGB(15,25,50); hl.BorderSizePixel=0
+local ht=Instance.new("TextLabel",hintBar); ht.Size=UDim2.new(1,0,1,0); ht.Position=UDim2.new(0,0,0,4)
+ht.BackgroundTransparency=1; ht.TextColor3=C.textMuted; ht.TextSize=8
+ht.Text="FIELD→เลือก field | FARM→Set Hive→Warp Farm | v6"
+ht.FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json")
+
+task.spawn(function() while true do tw(statusDot,{BackgroundTransparency=0.3},0.8):Play();task.wait(0.8);tw(statusDot,{BackgroundTransparency=0},0.8):Play();task.wait(0.8) end end)
+
+--==================================================
+-- HELPERS
+--==================================================
+local function getChar()
+	local c=player.Character; if not c then return nil,nil,nil end
+	return c,c:FindFirstChild("Humanoid"),c:FindFirstChild("HumanoidRootPart")
+end
+
+local function getPollen()
+	for _,fname in ipairs({"CoreStats","leaderstats","BeeSwarmStats","Stats","Data"}) do
+		local f=player:FindFirstChild(fname)
+		if f then
+			local p=f:FindFirstChild("Pollen"); local cap=f:FindFirstChild("Capacity")
+			if p then return p.Value,(cap and cap.Value or 9999) end
+		end
+	end
+	return 0,1
+end
+
+local function insideField(pos)
+	if not S.Corner1 or not S.Corner2 then return false end
+	return pos.X>=math.min(S.Corner1.X,S.Corner2.X) and pos.X<=math.max(S.Corner1.X,S.Corner2.X)
+		and pos.Z>=math.min(S.Corner1.Z,S.Corner2.Z) and pos.Z<=math.max(S.Corner1.Z,S.Corner2.Z)
+end
+
+local function isValidToken(v)
+	if not v:IsA("BasePart") then return false end
+	-- เก็บเฉพาะ token ที่มองเห็นชัด (Transparency=0.00) ไม่ใช่ที่จางหายแล้ว (0.70)
+	if v.Transparency > 0.1 then return false end
+	if v.CanCollide == true then return false end
+	-- กรอง token สูงเกิน 35 studs จาก field center Y
+	if S.FieldCenter and math.abs(v.Position.Y - S.FieldCenter.Y) > 35 then return false end
+	return true
+end
+
+local function allTokensInField()
+	local col=workspace:FindFirstChild("Collectibles"); if not col then return {} end
+	local list={}
+	for _,v in ipairs(col:GetChildren()) do
+		if insideField(v.Position) and isValidToken(v) then
+			table.insert(list,v)
+		end
+	end
+	return list
+end
+
+local function randomInField(y)
+	if not S.Corner1 or not S.Corner2 then return nil end
+	local mnX,mxX=math.min(S.Corner1.X,S.Corner2.X),math.max(S.Corner1.X,S.Corner2.X)
+	local mnZ,mxZ=math.min(S.Corner1.Z,S.Corner2.Z),math.max(S.Corner1.Z,S.Corner2.Z)
+	return Vector3.new(mnX+math.random()*(mxX-mnX),y,mnZ+math.random()*(mxZ-mnZ))
+end
+
+local function setPhase(ph,st,sc,mt,mc)
+	S.Phase=ph
+	if statusLbl and statusLbl.Parent then statusLbl.Text=st or statusLbl.Text; statusLbl.TextColor3=sc or C.textSub end
+	if modeLbl and modeLbl.Parent then modeLbl.Text=mt or modeLbl.Text; modeLbl.TextColor3=mc or C.textMuted end
+end
+
+local function updateHiveLbl()
+	if S.HivePos then
+		hiveLbl.Text=string.format("🏠 (%.0f, %.0f, %.0f)", S.HivePos.X, S.HivePos.Y, S.HivePos.Z)
+		btnSetHive.BackgroundColor3=Color3.fromRGB(0,60,25); btnSetHive.Text="✓ Set Here"
+	else
+		hiveLbl.Text="Hive: Not Set"
+		btnSetHive.BackgroundColor3=Color3.fromRGB(0,50,20); btnSetHive.Text="📍 Set Here"
+	end
+end
+
+--==================================================
+-- PRESS E (Make Honey) — เหมือน v5
+--==================================================
+local function pressE()
+	pcall(function()
+		VIM:SendKeyEvent(true,  Enum.KeyCode.E, false, game)
+		task.wait(0.1)
+		VIM:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+	end)
+end
+
+-- honey session ใช้ร่วมกันทั้ง WarpFarm และ Manual
+local function runHoneySession(hivePos, stopFn)
+	-- stopFn() = function ที่ return true เมื่อควรหยุด
+	local stats = player:FindFirstChild("CoreStats")
+	local pollenVal = stats and stats:FindFirstChild("Pollen")
+
+	if pollenVal then
+		local lastPollen   = pollenVal.Value
+		local lastDrop     = tick()   -- ครั้งล่าสุดที่ pollen ลด
+		local session      = true
+
+		local conn = pollenVal.Changed:Connect(function(newVal)
+			if newVal < lastPollen then
+				lastDrop = tick()       -- pollen ลดแล้ว = bee กำลัง convert จริง
+			end
+			if newVal <= 0 then session = false end
+			lastPollen = newVal
+		end)
+
+		-- กด E ครั้งแรกเพื่อเริ่ม
+		pressE()
+		task.wait(1.5)  -- รอ animation เริ่มก่อน
+
+		while session do
+			task.wait(0.5)
+			if stopFn and stopFn() then break end
+			local _,_,r2 = getChar(); if not r2 then break end
+			if hivePos and (r2.Position-hivePos).Magnitude > 12 then break end
+			if pollenVal.Value <= 0 then break end
+
+			-- กด E ใหม่เฉพาะเมื่อ pollen ไม่ลดนาน 4 วิ (bee หยุด/cancel)
+			if tick()-lastDrop >= 4 then
+				pressE()
+				task.wait(1.5)  -- รอ animation อีกรอบ
+			end
+		end
+
+		conn:Disconnect()
+	else
+		-- fallback ไม่มี CoreStats
+		local tStart = tick()
+		pressE()
+		task.wait(1.5)
+		while true do
+			task.wait(0.5)
+			if stopFn and stopFn() then break end
+			local pNow,_ = getPollen()
+			if pNow <= 0 then break end
+			if tick()-tStart > 180 then break end
+			-- กด E ใหม่ทุก 4 วิ
+			pressE()
+			task.wait(1.5)
+		end
+	end
+end
+
+local lastHoneyFire = 0
+local function doHoney()
+	if tick()-lastHoneyFire < 2 then return end
+	lastHoneyFire = tick()
+	pressE()
+end
+
+local farmCycles=0; local honeySessions=0
+
+--==================================================
+-- WARP FARM LOOP
+--==================================================
+task.spawn(function()
+	while true do
+		task.wait(0.2)
+		if not CFG.WarpFarm then
+			if S.Phase~="IDLE" then setPhase("IDLE","◉  Ready",C.accentGreen,"Phase: Idle",C.textMuted) end
+			continue
+		end
+		if S.IsBoosting then continue end
+
+		local _,hum,root=getChar()
+		if not root or not hum or hum.Health<=0 then continue end
+
+		local pollen,cap=getPollen()
+		local hive=S.HivePos
+		local fieldPt=S.FieldCenter
+
+		if not fieldPt then
+			setPhase("IDLE","⚠ Select a Field",C.accentOrange,"Waiting: No Field",C.accentOrange); continue
+		end
+
+		if S.Phase=="IDLE" or S.Phase=="WARP_FIELD" then
+			setPhase("WARP_FIELD","🚀 TP → Field",C.neon,"Phase: Warp→Field",C.textSub)
+			tweenTo(root, jitter(fieldPt+Vector3.new(0,4,0),2), 0.4)
+			randWait(0.3,0.6)
+			S.RandomTarget=nil; S.RandomTick=0
+			setPhase("FARM","📦 Farming...",C.accentGreen,"Phase: Farm",C.accentGreen)
+
+		elseif S.Phase=="FARM" then
+			if cap>0 and pollen>=cap then
+				if not hive then
+					setPhase("IDLE","⚠ Set Hive first",C.accentOrange,"Waiting: No Hive",C.accentOrange); continue
+				end
+				setPhase("WARP_HIVE","🚀 Pollen Full → Hive",C.accentOrange,"Phase: Warp→Hive",C.accentOrange)
+				tweenTo(root, jitter(hive+Vector3.new(0,3,0),0.5), 0.4)
+				continue
+			end
+
+			local tokens=allTokensInField()
+			if #tokens>0 then
+				table.sort(tokens,function(a,b)
+					return (root.Position-a.Position).Magnitude<(root.Position-b.Position).Magnitude
+				end)
+				local batch=math.min(6,#tokens)
+				for idx=1,batch do
+					local t=tokens[idx]
+					if not t or not t.Parent or t.Transparency>0.1 then continue end
+					local _,h2,r2=getChar(); if not r2 or not h2 or h2.Health<=0 then break end
+					if not CFG.WarpFarm then break end
+					local pNow,cNow=getPollen(); if cNow>0 and pNow>=cNow then break end
+					tweenTo(r2, jitter(t.Position+Vector3.new(0,2.5,0),0.3), 0.25)
+					if RE.Collect then safeFireServer(RE.Collect) end
+					randWait(0.05,0.12)
+				end
+				local pNow,cNow=getPollen()
+				setPhase("FARM",string.format("📦 %d tokens  %d/%d",#tokens,pNow,cNow),C.accentGreen,"Phase: Farm",C.accentGreen)
+			else
+				-- ไม่มี token → เดินใน field จริงๆ
+				local _,hum2,root2=getChar()
+				if hum2 and root2 then
+					local needNew = S.RandomTick > 15
+						or (S.RandomTarget == nil)
+						or (S.RandomTarget and (root2.Position-S.RandomTarget).Magnitude < 4)
+					if needNew then
+						S.RandomTarget = randomInField(root2.Position.Y)
+						S.RandomTick = 0
+					end
+					if S.RandomTarget then
+						hum2:MoveTo(S.RandomTarget)
+						local moveStart = tick()
+						local arrived = false
+						while not arrived do
+							task.wait(0.1)
+							local _,_,rr = getChar(); if not rr then break end
+							if not CFG.WarpFarm then break end
+							if #allTokensInField() > 0 then break end
+							local pN,cN = getPollen()
+							if cN > 0 and pN >= cN then break end
+							if (rr.Position-S.RandomTarget).Magnitude < 4 then arrived=true; break end
+							if tick()-moveStart > 3 then break end
+						end
+						S.RandomTick = S.RandomTick + 1
+					end
+				end
+				local pNow,cNow=getPollen()
+				setPhase("FARM",string.format("🚶 Walking  %d/%d",pNow,cNow),C.neon,"Phase: Farm→Walk",C.textSub)
+			end
+
+		elseif S.Phase=="WARP_HIVE" then
+			if not hive then setPhase("WARP_FIELD","↩ Back to Field",C.neon,"Phase: Warp→Field",C.textSub); continue end
+			if (root.Position-hive).Magnitude>6 then
+				tweenTo(root, jitter(hive+Vector3.new(0,3,0),0.4), 0.35)
+				continue
+			end
+			setPhase("HONEY","🍯 Making Honey...",C.accentOrange,"Phase: Honey",C.accentOrange)
+
+			runHoneySession(hive, function()
+				return not CFG.WarpFarm
+			end)
+
+			honeySessions=honeySessions+1; farmCycles=farmCycles+1
+			cycleLbl.Text="Cycles: "..farmCycles; honeyLbl.Text="Honey sessions: "..honeySessions
+			setPhase("WARP_FIELD","🚀 Back to Field",C.neon,"Phase: Warp→Field",C.textSub)
+		end
+	end
+end)
+
+--==================================================
+-- BUTTON LOGIC
+--==================================================
+speedBox.FocusLost:Connect(function()
+	local v=tonumber(speedBox.Text); if v then CFG.Speed=math.clamp(v,16,200) else speedBox.Text=tostring(CFG.Speed) end
+end)
+jumpBox.FocusLost:Connect(function()
+	local v=tonumber(jumpBox.Text); if v then CFG.Jump=math.clamp(v,50,500) else jumpBox.Text=tostring(CFG.Jump) end
+end)
+btnAutoClick.MouseButton1Click:Connect(function() CFG.AutoClick=toggleAutoClick() end)
+btnHoney.MouseButton1Click:Connect(function() CFG.AutoHoney=toggleHoney() end)
+btnAntiAFK.MouseButton1Click:Connect(function() CFG.AntiAFK=toggleAntiAFK() end)
+btnStuck.MouseButton1Click:Connect(function() CFG.StuckWarp=toggleStuck() end)
+btnBooster.MouseButton1Click:Connect(function() CFG.AutoBooster=toggleBooster() end)
+
+btnWarpFarm.MouseButton1Click:Connect(function()
+	CFG.WarpFarm=toggleWarpFarm()
+	if CFG.WarpFarm then
+		S.Phase="IDLE"; S.RandomTarget=nil; S.RandomTick=0
+		setPhase("IDLE","◉  Launching...",C.neon,"Phase: Starting",C.neon)
+	else
+		setPhase("IDLE","◉  Stopped",C.textMuted,"Phase: Idle",C.textMuted)
+	end
+end)
+
+-- Auto Detect Hive
+btnAutoHive.MouseButton1Click:Connect(function()
+	btnAutoHive.Text="⏳ Scanning..."; btnAutoHive.TextColor3=C.accentOrange
+	task.spawn(function()
+		local pos = findHiveInWorkspace()
+		if pos then
+			S.HivePos = pos
+			updateHiveLbl()
+			btnAutoHive.Text="✅ Found!"; btnAutoHive.TextColor3=C.accentGreen
+			print("🏠 Auto hive set: "..tostring(pos))
+		else
+			-- fallback: ใช้ตำแหน่ง player ปัจจุบัน
+			local _,_,root = getChar()
+			if root then
+				S.HivePos = root.Position
+				updateHiveLbl()
+				btnAutoHive.Text="📍 Used Position"; btnAutoHive.TextColor3=C.accentOrange
+				print("🏠 Hive = player pos (fallback)")
+			else
+				btnAutoHive.Text="❌ Not Found"; btnAutoHive.TextColor3=C.accentRed
+			end
+		end
+		task.delay(3, function()
+			if btnAutoHive and btnAutoHive.Parent then
+				btnAutoHive.Text="🔍 Auto Detect"; btnAutoHive.TextColor3=C.textPrimary
+			end
+		end)
+	end)
+end)
+
+-- Set Hive manually (ตำแหน่ง player ปัจจุบัน)
+btnSetHive.MouseButton1Click:Connect(function()
+	local _,_,root=getChar(); if not root then return end
+	S.HivePos=root.Position
+	updateHiveLbl()
+	print("🏠 Hive manually set: "..tostring(S.HivePos))
+end)
+
+btnClrHive.MouseButton1Click:Connect(function()
+	S.HivePos=nil; updateHiveLbl()
+end)
+
+--==================================================
+-- AUTO CLICK
+--==================================================
+-- AUTO CLICK
+--==================================================
+task.spawn(function()
+	while true do
+		task.wait(0.07)
+		if CFG.AutoClick and RE.Collect then
+			safeFireServer(RE.Collect)
+		end
+	end
+end)
+
+--==================================================
+-- MANUAL AUTO HONEY (ใช้ pressE แบบ v5)
+--==================================================
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		if not CFG.AutoHoney or CFG.WarpFarm then continue end
+		local _,_,root = getChar(); if not root then continue end
+		local hive = S.HivePos
+		if not hive or (root.Position-hive).Magnitude >= 12 then continue end
+		local pollen,_ = getPollen(); if pollen <= 0 then continue end
+
+		runHoneySession(hive, function()
+			return not CFG.AutoHoney or CFG.WarpFarm
+		end)
+	end
+end)
+
+--==================================================
+-- AUTO BOOSTER
+--==================================================
+local function boosterReady(n) local t=lastUsed[n]; return not t or (tick()-t)>=BOOSTER_CD end
+local function boosterLeft(n) local t=lastUsed[n]; if not t then return 0 end; return math.max(0,math.floor(BOOSTER_CD-(tick()-t))) end
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		if S.IsBoosting then continue end
+		for i,b in ipairs(BOOSTERS) do
+			if boosterReady(b.name) then
+				bCards[i].timeLbl.Text="✅ READY"; bCards[i].timeLbl.TextColor3=C.accentGreen
+				bCards[i].statPill.BackgroundColor3=C.accentGreen; bCards[i].statTxt.Text="READY"
+			else
+				local l=boosterLeft(b.name); local m=math.floor(l/60); local s=l%60
+				bCards[i].timeLbl.Text=string.format("⏱ %dm %ds",m,s); bCards[i].timeLbl.TextColor3=C.textMuted
+				bCards[i].statPill.BackgroundColor3=bCards[i].defColor; bCards[i].statTxt.Text=string.format("%d:%02d",m,s)
+			end
+		end
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(2)
+		if not CFG.AutoBooster or S.IsBoosting then continue end
+		local _,hum,root=getChar(); if not hum or not root or hum.Health<=0 then continue end
+		local pending={}
+		for i,b in ipairs(BOOSTERS) do if boosterReady(b.name) then table.insert(pending,{b=b,idx=i}) end end
+		if #pending==0 then continue end
+		S.IsBoosting=true
+		local hivePos=S.HivePos
+		for _,entry in ipairs(pending) do
+			local b=entry.b; local idx=entry.idx
+			if not boosterReady(b.name) then continue end
+			local _,_,r2=getChar(); if not r2 then break end
+			bCards[idx].timeLbl.Text="⚡ Going..."; bCards[idx].statPill.BackgroundColor3=C.accentOrange; bCards[idx].statTxt.Text="GO"
+			tweenTo(r2, jitter(b.pos+Vector3.new(0,3,0),0.8), 0.45)
+			randWait(1.2,1.8)
+			-- BSS กด booster ใช้ ToyEvent ส่งชื่อ booster เป็น argument
+			local toyEv = ReplicatedStorage:FindFirstChild("Events") and ReplicatedStorage.Events:FindFirstChild("ToyEvent")
+			if toyEv then
+				safeFireServer(toyEv, b.name)
+			elseif RE.Booster then
+				safeFireServer(RE.Booster, b.name)
+			end
+			randWait(0.8,1.2); lastUsed[b.name]=tick(); bCards[idx].timeLbl.Text="✔ Done"
+		end
+		if hivePos then
+			local _,_,r3=getChar()
+			if r3 then tweenTo(r3, jitter(hivePos+Vector3.new(0,3,0),0.5), 0.35) end
+		end
+		S.IsBoosting=false
+		if CFG.WarpFarm then S.Phase="IDLE" end
+	end
+end)
+
+--==================================================
+-- STUCK WATCHDOG
+--==================================================
+local STUCK_TIMEOUT=12; local STUCK_DIST=2.5; local WARP_CD=15
+local W={anchorPos=nil,anchorTime=nil,warping=false}
+
+local function doWarpRecovery()
+	if W.warping then return end
+	if (tick()-S.LastWarpTick)<WARP_CD then return end
+	W.warping=true
+	local hive=S.HivePos; local _,_,r=getChar()
+	if hive and r then
+		tweenTo(r, jitter(hive+Vector3.new(0,4,0),0.8), 0.5)
+	elseif S.FieldCenter and r then
+		tweenTo(r, jitter(S.FieldCenter+Vector3.new(0,4,0),1), 0.5)
+	end
+	S.Phase="IDLE"; S.RandomTarget=nil; S.RandomTick=0; S.LastWarpTick=tick(); S.WarpCount=S.WarpCount+1
+	W.anchorPos=nil; W.anchorTime=nil
+	if warpLbl and warpLbl.Parent then warpLbl.Text="🏠  Warps: "..S.WarpCount.."  |  Last: "..os.date("%H:%M:%S") end
+	task.wait(1.5); W.warping=false
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		if not CFG.StuckWarp or W.warping then W.anchorPos=nil;W.anchorTime=nil;continue end
+		local _,hum,root=getChar()
+		if not root or not hum or hum.Health<=0 then W.anchorPos=nil;W.anchorTime=nil;continue end
+		if S.Phase=="HONEY" or S.Phase=="WARP_HIVE" or S.Phase=="WARP_FIELD" or S.IsBoosting
+			or (S.Phase=="FARM" and S.RandomTarget~=nil) then  -- กำลังเดินใน field อยู่ ไม่ใช่ stuck
+			W.anchorPos=nil;W.anchorTime=nil;continue
+		end
+		local pos=root.Position
+		if W.anchorPos==nil then W.anchorPos=pos;W.anchorTime=tick()
+		elseif (pos-W.anchorPos).Magnitude>STUCK_DIST then W.anchorPos=pos;W.anchorTime=tick()
+		else
+			local stuckFor=tick()-W.anchorTime
+			if stuckFor>4 then
+				statusLbl.Text=string.format("⚠ Stuck %.0fs/%ds",stuckFor,STUCK_TIMEOUT)
+				statusLbl.TextColor3=(STUCK_TIMEOUT-stuckFor)>4 and C.accentOrange or C.accentRed
+			end
+			if stuckFor>=STUCK_TIMEOUT then task.spawn(doWarpRecovery) end
+		end
+	end
+end)
+
+--==================================================
+-- RESPAWN + ANTI-AFK + SPEED
+--==================================================
+task.spawn(function()
+	while true do
+		task.wait(1)
+		local _,hum,_=getChar(); if not hum then continue end
+		if hum.Health<=0 then
+			statusLbl.Text="💀 Respawning..."; statusLbl.TextColor3=C.accentRed
+			S.Phase="IDLE"; S.RandomTarget=nil; S.RandomTick=0; task.wait(6)
+			statusLbl.Text="◉  Ready"; statusLbl.TextColor3=C.accentGreen
+		end
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(120+math.random()*30)
+		if not CFG.AntiAFK then continue end
+		local _,hum,_=getChar(); if not hum or hum.Health<=0 then continue end
+		pcall(function() hum.Jump=true end); task.wait(0.3); pcall(function() hum.Jump=false end)
+	end
+end)
+
+RunService.Heartbeat:Connect(function()
+	local _,hum,_=getChar(); if not hum then return end
+	pcall(function() hum.WalkSpeed=CFG.Speed; hum.JumpPower=CFG.Jump end)
+	local p,c=getPollen()
+	if pollenLbl and pollenLbl.Parent then pollenLbl.Text=string.format("🌼  %d / %d",p,c) end
+	if S.IsBoosting and statusLbl and statusLbl.Parent then statusLbl.Text="🚀 Boosting..."; statusLbl.TextColor3=C.accentOrange end
+end)
+
+print("✅ BSS AutoFarm v6 — Real Positions loaded")
+print("📋 FIELD→เลือก field | FARM→🔍 Auto Detect หรือ 📍 Set Hive → เปิด Warp Farm")
